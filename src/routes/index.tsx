@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Clock, AlertTriangle, Pill, ChevronDown, Plus, X } from "lucide-react";
+import { Clock, AlertTriangle, Pill, ChevronDown, Plus, X, History, Trash2 } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   component: Index,
@@ -12,6 +12,16 @@ const SUMMARY_CLEARED_STORAGE_KEY = "dose-buddy-summary-cleared-for-date";
 type SummaryClearState = {
   date: string;
   takenKeys: string[];
+};
+
+type HistoryStatus = "taken" | "late" | "missed";
+type HistoryRecord = {
+  key: string;
+  medication: string;
+  dosage: string;
+  time: string;
+  status: HistoryStatus;
+  timestamp: number;
 };
 
 type Dose = {
@@ -75,6 +85,17 @@ function Index() {
     interval: 0,
     max_doses_per_day: 1
   });
+  const [history, setHistory] = useState<HistoryRecord[]>(() => {
+    if (typeof window === "undefined") return [];
+    const raw = window.localStorage.getItem("dose-buddy-history");
+    if (!raw) return [];
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  });
+  const [showHistory, setShowHistory] = useState(false);
 
   type DoseGroup = Dose & { duplicates: Dose[] };
 
@@ -126,6 +147,12 @@ function Index() {
       window.localStorage.removeItem(SUMMARY_CLEARED_STORAGE_KEY);
     }
   }, [summaryClearState]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("dose-buddy-history", JSON.stringify(history));
+    }
+  }, [history]);
 
   const doseKey = (dose: Dose) =>
     `${dose.medication.trim().toLowerCase()}|${dose.scheduled_date}|${dose.time}|${dose.slot}`;
@@ -314,6 +341,27 @@ function Index() {
     setSecondsLeft(nextSecondsLeft);
 
     if (currentMissedDose) {
+      const missed = getMissedDoses(now);
+      setHistory(prev => {
+        let changed = false;
+        const nextHistory = [...prev];
+        missed.forEach(dose => {
+          const key = doseKey(dose);
+          const existing = nextHistory.find(h => h.key === key);
+          if (!existing) {
+            nextHistory.unshift({
+              key,
+              medication: dose.medication,
+              dosage: dose.dosage,
+              time: dose.time,
+              status: "missed",
+              timestamp: Date.now()
+            });
+            changed = true;
+          }
+        });
+        return changed ? nextHistory : prev;
+      });
       setState("missed");
       return;
     }
@@ -477,6 +525,17 @@ function Index() {
       );
 
       if (sameGroup.length > 0) {
+        setHistory(prev => {
+          const newRec: HistoryRecord = {
+            key: doseKey(nextDose),
+            medication: nextDose.medication,
+            dosage: nextDose.dosage,
+            time: nextDose.time,
+            status: "taken",
+            timestamp: Date.now()
+          };
+          return [newRec, ...prev];
+        });
         // Force a full refresh from backend to ensure state consistency
         await fetchDoses();
         setState("normal");
@@ -522,6 +581,12 @@ function Index() {
       );
 
       if (responses.every((response) => response.ok)) {
+        setHistory(prev => {
+          const key = doseKey(dose);
+          return prev.map(h => 
+            h.key === key ? { ...h, status: "late", timestamp: Date.now() } : h
+          );
+        });
         await fetchDoses();
       }
     } catch (error) {
@@ -603,7 +668,7 @@ function Index() {
         </div>
       )}
 
-      <header className="px-5 pt-6 pb-4">
+      <header className="px-5 pt-6 pb-4 flex items-center justify-between">
         <div className="flex items-center gap-3 text-slate-700">
           <Clock size={24} />
           <h1 className="text-3xl font-black leading-none tracking-[-0.04em] sm:text-4xl">
@@ -611,6 +676,9 @@ function Index() {
             <span className="text-[#4398f3]">Pal</span>
           </h1>
         </div>
+        <button onClick={() => setShowHistory(true)} className="p-2 bg-slate-200 text-slate-600 rounded-full hover:bg-slate-300 transition-colors">
+          <History size={20} />
+        </button>
       </header>
 
       <main className="px-5 pb-8 space-y-6">
@@ -881,6 +949,46 @@ function Index() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      
+      {/* History Modal */}
+      {showHistory && (
+        <div className="fixed inset-0 z-[100] bg-black/50 flex flex-col justify-end p-4">
+          <div className="bg-white rounded-2xl w-full max-w-sm mx-auto p-6 space-y-4 max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between pb-2 border-b">
+              <h3 className="text-lg font-bold flex items-center gap-2 text-slate-800">
+                <History size={20} /> History
+              </h3>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setHistory([])} title="Clear History" className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors">
+                  <Trash2 size={20} />
+                </button>
+                <button onClick={() => setShowHistory(false)} className="p-2 text-slate-400 hover:bg-slate-50 rounded-full transition-colors">
+                  <X size={24} />
+                </button>
+              </div>
+            </div>
+            <div className="space-y-3 overflow-y-auto pr-1">
+              {history.length === 0 ? (
+                <p className="text-center text-slate-500 py-8">No history yet.</p>
+              ) : (
+                history.map((record, idx) => (
+                  <div key={idx} className={`p-3 rounded-xl border-l-4 shadow-sm ${record.status === 'taken' ? 'border-green-500 bg-green-50' : record.status === 'late' ? 'border-yellow-500 bg-yellow-50' : 'border-red-500 bg-red-50'}`}>
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <p className={`font-bold ${record.status === 'taken' ? 'text-green-900' : record.status === 'late' ? 'text-yellow-900' : 'text-red-900'}`}>{record.medication}</p>
+                        <p className="text-xs text-slate-600 mt-1">{record.dosage} • {record.time}</p>
+                      </div>
+                      <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded-md ${record.status === 'taken' ? 'bg-green-200 text-green-800' : record.status === 'late' ? 'bg-yellow-200 text-yellow-800' : 'bg-red-200 text-red-800'}`}>
+                        {record.status}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       )}
