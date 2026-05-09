@@ -2,6 +2,11 @@
 
 This directory contains the embedded firmware for the Dose Buddy device.
 
+## TODO
+```
+This is just an empty directory. All hardware logics in this directory is NOT IMPLEMENTED YET.
+```
+
 ## Requirements
 
 - Arduino IDE or PlatformIO
