@@ -13,9 +13,12 @@ type Dose = {
   medication: string;
   dosage: string;
   time: string;
+  scheduled_date: string;
   slot: number;
   pills_count: number;
   taken: boolean;
+  interval?: number;
+  max_doses_per_day?: number;
 };
 
 function Index() {
@@ -24,16 +27,27 @@ function Index() {
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
   const [doses, setDoses] = useState<Dose[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [demoSpeed, setDemoSpeed] = useState(1);
+  const [tick, setTick] = useState(0);
+  const [timeOffsetSeconds, setTimeOffsetSeconds] = useState(0);
   const [newDose, setNewDose] = useState({
     medication: "",
     dosage: "1",
     time: "",
+    scheduled_date: "",
     slot: 1,
     pills_count: 5,
-    interval: 0
+    interval: 0,
+    max_doses_per_day: 1
   });
+
+  type DoseGroup = Dose & { duplicates: Dose[] };
+
+  const resetNewDose = () => {
+    setNewDose({ medication: "", dosage: "1", time: "", scheduled_date: "", slot: 1, pills_count: 5, interval: 0, max_doses_per_day: 1 });
+  };
 
   const fetchDoses = async () => {
     try {
@@ -51,158 +65,198 @@ function Index() {
     fetchDoses();
   }, []);
 
-  const getNextDoseForTimer = () => {
-    const sortedUntaken = doses
-      .filter((d) => !d.taken)
-      .sort((a, b) => a.time.localeCompare(b.time));
-    
-    // If the earliest dose is missed (due for > 10m), we skip it for the timer
-    // and show the next one instead.
-    const now = new Date();
-    return sortedUntaken.find(d => {
-      const [hours, minutes] = d.time.split(":").map(Number);
-      const target = new Date();
-      target.setHours(hours, minutes, 0, 0);
-      const diff = Math.floor((target.getTime() - now.getTime()) / 1000);
-      return diff > -600; // Not missed yet
-    }) || sortedUntaken[0];
+  const doseKey = (dose: Dose) =>
+    `${dose.medication.trim().toLowerCase()}|${dose.scheduled_date}|${dose.time}`;
+
+  const mergeDoseGroup = (group: Dose[]): DoseGroup => {
+    const [primary, ...rest] = group;
+    return {
+      ...primary,
+      pills_count: group.reduce((sum, dose) => sum + dose.pills_count, 0),
+      taken: group.every((dose) => dose.taken),
+      duplicates: rest,
+    };
   };
 
-  const nextDose = getNextDoseForTimer();
+  const getUniqueDoses = (list: Dose[]): DoseGroup[] => {
+    const grouped = new Map<string, Dose[]>();
 
-  // Helper to check for any missed doses
-  const getMissedDose = () => {
-    const now = new Date();
-    return doses.find(d => {
-      if (d.taken) return false;
-      const [hours, minutes] = d.time.split(":").map(Number);
-      const target = new Date();
-      target.setHours(hours, minutes, 0, 0);
-      const diff = Math.floor((target.getTime() - now.getTime()) / 1000);
-      return diff <= -600;
+    list.forEach((dose) => {
+      const key = doseKey(dose);
+      const current = grouped.get(key) ?? [];
+      current.push(dose);
+      grouped.set(key, current);
     });
+
+    return Array.from(grouped.values()).map(mergeDoseGroup);
   };
 
-  const missedDose = getMissedDose();
+  const getSimulatedNow = (offsetSeconds = timeOffsetSeconds) => {
+    return new Date(Date.now() + offsetSeconds * 1000);
+  };
 
-  useEffect(() => {
-    if (!nextDose) {
+  const getDoseDateTime = (dose: Dose, now = getSimulatedNow()) => {
+    const scheduledDate = dose.scheduled_date || now.toISOString().slice(0, 10);
+    const [hours, minutes] = dose.time.split(":").map(Number);
+    const target = new Date(`${scheduledDate}T00:00:00`);
+    target.setHours(hours, minutes, 0, 0);
+    return target;
+  };
+
+  const getDoseDiff = (dose: Dose, now = getSimulatedNow()) => {
+    const target = getDoseDateTime(dose, now);
+    return Math.floor((target.getTime() - now.getTime()) / 1000);
+  };
+
+  const getNextDoseForTimer = (now = getSimulatedNow()) => {
+    const sortedUntaken = getUniqueDoses(doses)
+      .filter((d) => !d.taken)
+      .sort((a, b) => getDoseDateTime(a, now).getTime() - getDoseDateTime(b, now).getTime());
+
+    return sortedUntaken.find((dose) => getDoseDiff(dose, now) > -600) || null;
+  };
+
+  const getMissedDoses = (now = getSimulatedNow()) => {
+    return getUniqueDoses(doses)
+      .filter((dose) => !dose.taken && getDoseDiff(dose, now) <= -600)
+      .sort((a, b) => getDoseDateTime(a, now).getTime() - getDoseDateTime(b, now).getTime());
+  };
+
+  const getActiveSupplies = (now = getSimulatedNow()) => {
+    return getUniqueDoses(doses)
+      .filter((dose) => !dose.taken)
+      .sort((a, b) => getDoseDateTime(a, now).getTime() - getDoseDateTime(b, now).getTime());
+  };
+
+  const simulatedNow = getSimulatedNow();
+  const nextDose = getNextDoseForTimer(simulatedNow);
+  const missedDoses = getMissedDoses(simulatedNow);
+
+  const syncTimerState = () => {
+    const now = getSimulatedNow();
+    const currentMissedDose = getMissedDoses(now)[0];
+    const currentNextDose = getNextDoseForTimer(now);
+
+    if (!currentNextDose && !currentMissedDose) {
       setSecondsLeft(null);
       setState("normal");
       return;
     }
 
-    const calculateTimeLeft = () => {
-      const now = new Date();
-      const [hours, minutes] = nextDose.time.split(":").map(Number);
-      const target = new Date();
-      target.setHours(hours, minutes, 0, 0);
+    const activeDose = currentNextDose ?? currentMissedDose;
+    const nextSecondsLeft = activeDose ? getDoseDiff(activeDose, now) : null;
+    setSecondsLeft(nextSecondsLeft);
 
-      const diff = Math.floor((target.getTime() - now.getTime()) / 1000);
-      return diff;
-    };
+    if (currentMissedDose) {
+      setState("missed");
+      return;
+    }
 
-    const initialDiff = calculateTimeLeft();
-    setSecondsLeft(initialDiff);
+    if (nextSecondsLeft === null) {
+      setState("normal");
+    } else if (nextSecondsLeft <= 0) {
+      if (state !== "buzzing") {
+        fetch("http://127.0.0.1:5000/api/dispense", { method: "POST" }).catch(console.error);
+      }
+      setState("buzzing");
+    } else if (nextSecondsLeft <= 300) {
+      setState("upcoming");
+    } else {
+      setState("normal");
+    }
+  };
 
+  useEffect(() => {
+    syncTimerState();
+  }, [tick, timeOffsetSeconds, doses, demoSpeed]);
+
+  useEffect(() => {
     const timerId = setInterval(() => {
-      setSecondsLeft((prev) => {
-        if (prev === null) return null;
-        const nextValue = prev - demoSpeed;
-        
-        // Find if ANY dose is currently missed to keep UI state
-        // (but timer continues for the 'nextDose')
-        const currentNow = new Date();
-        const anyUntaken = doses.filter(d => !d.taken);
-        const hasMissed = anyUntaken.some(d => {
-          const [h, m] = d.time.split(":").map(Number);
-          const t = new Date();
-          t.setHours(h, m, 0, 0);
-          return Math.floor((t.getTime() - currentNow.getTime()) / 1000) <= -600;
-        });
-
-        if (hasMissed) {
-          setState("missed");
-        } else if (nextValue <= 0) {
-          setState("buzzing");
-        } else if (nextValue <= 300) {
-          setState("upcoming");
-        } else {
-          setState("normal");
-        }
-        
-        return nextValue;
-      });
+      setTick((prev) => prev + 1);
+      setTimeOffsetSeconds((prevOffset) =>
+        demoSpeed > 1 ? prevOffset + (demoSpeed - 1) : prevOffset,
+      );
     }, 1000);
 
     return () => clearInterval(timerId);
-  }, [nextDose, demoSpeed, doses]);
+  }, [demoSpeed]);
 
   const handleAddDose = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsSaving(true);
 
-    // Dosage validation: only ends in .0 or .5
-    const dosageNum = parseFloat(newDose.dosage);
-    if (isNaN(dosageNum) || (dosageNum * 2) % 1 !== 0) {
-      alert("Dosage must be a whole number or end in .5 (e.g., 0.5, 1.5, 2)");
-      return;
-    }
+    try {
+      const dosageNum = parseFloat(newDose.dosage);
+      if (isNaN(dosageNum) || (dosageNum * 2) % 1 !== 0) {
+        alert("Dosage must be a whole number or end in .5 (e.g., 0.5, 1.5, 2)");
+        return;
+      }
+
+      const today = new Date().toISOString().slice(0, 10);
+      const normalizedDose = {
+        ...newDose,
+        medication: newDose.medication.trim(),
+        scheduled_date: newDose.scheduled_date || today,
+        slot: Number.isFinite(newDose.slot) ? newDose.slot : 1,
+        pills_count: Number.isFinite(newDose.pills_count) ? newDose.pills_count : 1,
+        interval: Number.isFinite(newDose.interval) ? newDose.interval : 0,
+        max_doses_per_day: Number.isFinite(newDose.max_doses_per_day) ? newDose.max_doses_per_day : 1,
+      };
     
-    // Check if target SLOT is occupied by a DIFFERENT name
-    const activeDoses = doses.filter(d => !d.taken);
-    const existingInSlot = activeDoses.find(d => d.slot === newDose.slot);
+      const activeDoses = doses.filter(d => !d.taken);
+      const existingInSlot = activeDoses.find(d => d.slot === normalizedDose.slot);
 
-    if (existingInSlot && existingInSlot.medication.toLowerCase() !== newDose.medication.toLowerCase()) {
-      alert(`Conflict: Slot ${newDose.slot} is already being used for "${existingInSlot.medication}". Please use a different slot.`);
-      return;
-    }
+      if (existingInSlot && existingInSlot.medication.toLowerCase() !== normalizedDose.medication.toLowerCase()) {
+        alert(`Conflict: Slot ${normalizedDose.slot} is already being used for "${existingInSlot.medication}". Please use a different slot.`);
+        return;
+      }
 
-    // Filter by name AND slot specifically now
-    const existingSameMedInSlot = activeDoses.find(d => 
-      d.slot === newDose.slot && 
-      d.medication.toLowerCase() === newDose.medication.toLowerCase()
-    );
+      const existingSameMedInSlot = activeDoses.find(d => 
+        d.time === normalizedDose.time &&
+        d.scheduled_date === normalizedDose.scheduled_date &&
+        d.medication.toLowerCase() === normalizedDose.medication.toLowerCase()
+      );
 
-    if (existingSameMedInSlot) {
-      // Update count in that specific slot
-      try {
+      if (existingSameMedInSlot) {
         const response = await fetch(`http://127.0.0.1:5000/api/doses/${existingSameMedInSlot.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            pills_count: existingSameMedInSlot.pills_count + Number(newDose.pills_count)
+            pills_count: existingSameMedInSlot.pills_count + normalizedDose.pills_count
           }),
         });
 
-        if (response.ok) {
-          setShowAddModal(false);
-          setNewDose({ medication: "", dosage: "1", time: "", slot: 1, pills_count: 5, interval: 0 });
-          await fetchDoses();
-          return;
+        if (!response.ok) {
+          throw new Error(await response.text());
         }
-      } catch (error) {
-        console.error("Failed to update existing dose:", error);
-      }
-    }
 
-    // Create new dose
-    try {
+        setShowAddModal(false);
+        resetNewDose();
+        await fetchDoses();
+        return;
+      }
+
       const response = await fetch("http://127.0.0.1:5000/api/doses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...newDose,
-          dosage: newDose.dosage + " tablet(s)"
+          ...normalizedDose,
+          dosage: normalizedDose.dosage + " tablet(s)"
         }),
       });
-      
-      if (response.ok) {
-        setShowAddModal(false);
-        setNewDose({ medication: "", dosage: "1", time: "", slot: 1, pills_count: 5, interval: 0 });
-        await fetchDoses(); 
+
+      if (!response.ok) {
+        throw new Error(await response.text());
       }
+
+      setShowAddModal(false);
+      resetNewDose();
+      await fetchDoses();
     } catch (error) {
       console.error("Failed to add dose:", error);
+      alert("Could not save to dispenser. Check the form values and backend connection.");
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -220,13 +274,25 @@ function Index() {
     if (!nextDose) return;
 
     try {
-      const response = await fetch(`http://127.0.0.1:5000/api/doses/${nextDose.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taken: true }),
-      });
+      const sameGroup = doses.filter(
+        (dose) =>
+          dose.medication.toLowerCase() === nextDose.medication.toLowerCase() &&
+          dose.scheduled_date === nextDose.scheduled_date &&
+          dose.time === nextDose.time &&
+          !dose.taken,
+      );
 
-      if (response.ok) {
+      await Promise.all(
+        sameGroup.map((dose, index) =>
+          fetch(`http://127.0.0.1:5000/api/doses/${dose.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ taken: true, decrement_stock: index === 0, schedule_next: index === 0 }),
+          }),
+        ),
+      );
+
+      if (sameGroup.length > 0) {
         // Force a full refresh from backend to ensure state consistency
         await fetchDoses();
         setState("normal");
@@ -245,19 +311,54 @@ function Index() {
   const ss = secondsLeft !== null ? String(absSeconds % 60).padStart(2, "0") : "--";
   const prefix = secondsLeft !== null && secondsLeft < 0 ? "-" : "";
 
-  const handleTakeMissedDose = async (id: number) => {
+  const handleTakeMissedDose = async (dose: Dose) => {
     try {
-      const response = await fetch(`http://127.0.0.1:5000/api/doses/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taken: true }),
-      });
+      const sameGroup = doses.filter(
+        (item) =>
+          item.medication.toLowerCase() === dose.medication.toLowerCase() &&
+          item.scheduled_date === dose.scheduled_date &&
+          item.time === dose.time &&
+          !item.taken,
+      );
 
-      if (response.ok) {
+      const responses = await Promise.all(
+        sameGroup.map((item, index) =>
+          fetch(`http://127.0.0.1:5000/api/doses/${item.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ taken: true, decrement_stock: index === 0, schedule_next: index === 0 }),
+          }),
+        ),
+      );
+
+      if (responses.every((response) => response.ok)) {
         await fetchDoses();
       }
     } catch (error) {
       console.error("Failed to update missed dose:", error);
+    }
+  };
+
+  const handleDeleteSupply = async (dose: DoseGroup) => {
+    const confirmed = window.confirm(`Delete ${dose.medication} at ${dose.time}?`);
+    if (!confirmed) return;
+
+    const groupIds = [dose.id, ...dose.duplicates.map((item) => item.id)];
+
+    try {
+      const responses = await Promise.all(
+        groupIds.map((id) =>
+          fetch(`http://127.0.0.1:5000/api/doses/${id}`, {
+            method: "DELETE",
+          }),
+        ),
+      );
+
+      if (responses.every((response) => response.ok)) {
+        await fetchDoses();
+      }
+    } catch (error) {
+      console.error("Failed to delete supply:", error);
     }
   };
 
@@ -291,16 +392,22 @@ function Index() {
               className={`transition-transform ${expanded ? "rotate-180" : ""}`}
             />
           </button>
-          {expanded && missedDose && (
-            <div className="px-4 pb-4 text-sm bg-red-700">
-              <p className="font-semibold">{missedDose.medication} — {missedDose.dosage}</p>
-              <p>Scheduled at {missedDose.time}.</p>
-              <button 
-                onClick={() => handleTakeMissedDose(missedDose.id)}
-                className="mt-3 w-full py-2 bg-white text-red-700 rounded-lg font-bold hover:bg-slate-100 transition-colors"
-              >
-                MARK AS TAKEN
-              </button>
+          {expanded && missedDoses.length > 0 && (
+            <div className="px-4 pb-4 text-sm bg-red-700 space-y-3">
+              {missedDoses.map((dose) => (
+                <div key={dose.id} className="rounded-lg bg-red-800/60 p-3">
+                  <p className="font-semibold">
+                    {dose.medication} — {dose.dosage}
+                  </p>
+                  <p>Scheduled at {dose.time}.</p>
+                  <button
+                    onClick={() => handleTakeMissedDose(dose)}
+                    className="mt-3 w-full py-2 bg-white text-red-700 rounded-lg font-bold hover:bg-slate-100 transition-colors"
+                  >
+                    MARK AS TAKEN
+                  </button>
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -344,7 +451,7 @@ function Index() {
                 Countdown
               </p>
               <p className="text-4xl font-mono font-extrabold text-black mt-1">
-                  {state === "missed" ? "OVERDUE" : `${prefix}${mm}:${ss}`}
+                  {state === "missed" ? (nextDose ? `${prefix}${mm}:${ss}` : "OVERDUE") : `${prefix}${mm}:${ss}`}
                 </p>
               </div>
               {state === "buzzing" && (
@@ -359,13 +466,18 @@ function Index() {
               <p className="text-[10px] text-slate-400 uppercase font-bold text-center">Demo Controls</p>
               <div className="grid grid-cols-2 gap-2">
                 <button
-                  onClick={() => setSecondsLeft(prev => prev !== null ? prev - 600 : null)}
+                  onClick={() => {
+                    setTimeOffsetSeconds((prev) => prev + 600);
+                  }}
                   className="text-[10px] bg-slate-100 py-1 rounded hover:bg-slate-200"
                 >
                   Fast Forward 10m
                 </button>
                 <button
-                  onClick={() => setDemoSpeed(s => s === 1 ? 60 : 1)}
+                  onClick={() => {
+                    const newSpeed = demoSpeed === 1 ? 60 : 1;
+                    setDemoSpeed(newSpeed);
+                  }}
                   className={`text-[10px] py-1 rounded border ${demoSpeed > 1 ? 'bg-orange-100 border-orange-200' : 'bg-slate-100 border-slate-200'}`}
                 >
                   {demoSpeed > 1 ? 'Normal Speed' : '60x Speed'}
@@ -414,7 +526,7 @@ function Index() {
             {loading ? (
               <p>Loading supplies...</p>
             ) : (
-              doses.map((s) => (
+              getActiveSupplies(simulatedNow).map((s) => (
                 <li
                   key={s.id}
                   className="flex items-center justify-between bg-teal-50 border border-teal-100 rounded-xl px-4 py-3"
@@ -425,12 +537,22 @@ function Index() {
                       {s.medication}
                     </span>
                     <span className="text-[10px] text-slate-400 ml-7">
-                      Slot {s.slot} • {s.pills_count} items left
+                      {s.pills_count} items left
                     </span>
                   </div>
-                  <span className="text-teal-800 font-bold">
-                    {s.taken ? "Taken" : s.time}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-teal-800 font-bold">
+                      {s.time}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSupply(s)}
+                      className="p-1 rounded-full text-red-600 hover:bg-red-100 transition-colors"
+                      aria-label={`Delete ${s.medication} at ${s.time}`}
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
                 </li>
               ))
             )}
@@ -508,6 +630,17 @@ function Index() {
                 </div>
               </div>
               <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-500 uppercase">Max Doses Per Day</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={newDose.max_doses_per_day}
+                  onChange={e => setNewDose({...newDose, max_doses_per_day: parseInt(e.target.value)})}
+                  className="w-full p-2 border rounded-lg text-black"
+                  placeholder="1"
+                />
+              </div>
+              <div className="space-y-1">
                 <label className="text-xs font-bold text-slate-500 uppercase">Schedule Time</label>
                 <input 
                   required
@@ -517,13 +650,22 @@ function Index() {
                   className="w-full p-2 border rounded-lg text-black"
                 />
               </div>
-              <button 
-                type="submit"
-                className="w-full py-3 bg-teal-600 text-white rounded-xl font-bold shadow-lg hover:bg-teal-700 transition-colors"
-                disabled={loading}
-              >
-                {loading ? "SAVING..." : "SAVE TO DISPENSER"}
-              </button>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={resetNewDose}
+                  className="w-full py-3 bg-slate-100 text-slate-700 rounded-xl font-bold hover:bg-slate-200 transition-colors"
+                >
+                  CLEAR
+                </button>
+                <button 
+                  type="submit"
+                  className="w-full py-3 bg-teal-600 text-white rounded-xl font-bold shadow-lg hover:bg-teal-700 transition-colors"
+                  disabled={isSaving}
+                >
+                  {isSaving ? "SAVING..." : "SAVE TO DISPENSER"}
+                </button>
+              </div>
             </form>
           </div>
         </div>
