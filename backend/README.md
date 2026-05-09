@@ -1,6 +1,6 @@
-# Dose Buddy Backend
+# PillPal Backend
 
-This is the Python backend for the Dose Buddy application.
+This is the Python backend for the PillPal application.
 
 ## Requirements
 

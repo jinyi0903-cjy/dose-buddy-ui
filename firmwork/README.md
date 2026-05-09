@@ -1,6 +1,6 @@
-# Dose Buddy Firmware
+# PillPal Firmware
 
-This directory contains the embedded firmware for the Dose Buddy device.
+This directory contains the embedded firmware for the PillPal device.
 
 ## TODO
 ```
