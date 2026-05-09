@@ -45,14 +45,35 @@ const getLocalTodayKey = () => {
   return `${year}-${month}-${day}`;
 };
 
-const hardcoded7Days = [
-  { date: "May 03", day: "Sun", status: "taken", medication: "Aspirin", time: "08:00 AM" },
-  { date: "May 04", day: "Mon", status: "taken", medication: "Aspirin", time: "08:15 AM" },
-  { date: "May 05", day: "Tue", status: "missed", medication: "Metformin", time: "Missed" },
-  { date: "May 06", day: "Wed", status: "taken", medication: "Metformin", time: "09:00 AM" },
-  { date: "May 07", day: "Thu", status: "missed", medication: "Vitamin D", time: "Missed" },
-  { date: "May 08", day: "Fri", status: "taken", medication: "Aspirin", time: "08:30 AM" },
-  { date: "May 09", day: "Sat", status: "today", medication: "Pending...", time: "--" },
+// All pills taken on "taken" days
+const allTakenPills = [
+  { name: "Aspirin", dosage: "1 tablet", time: "08:00 AM" },
+  { name: "Metformin", dosage: "0.5 tablet", time: "09:00 AM" },
+  { name: "Vitamin D", dosage: "1 tablet", time: "10:00 AM" },
+];
+
+// Helper to randomly pick 1-2 pills from the taken pills list
+const getRandomMissedPills = (): typeof allTakenPills => {
+  const shuffled = [...allTakenPills].sort(() => Math.random() - 0.5);
+  const count = Math.random() < 0.5 ? 1 : 2;
+  return shuffled.slice(0, count);
+};
+
+type SevenDayItem = {
+  date: string;
+  day: string;
+  status: "taken" | "missed" | "today";
+  pills: typeof allTakenPills;
+};
+
+const hardcoded7Days: SevenDayItem[] = [
+  { date: "May 03", day: "Sun", status: "taken", pills: allTakenPills },
+  { date: "May 04", day: "Mon", status: "taken", pills: allTakenPills },
+  { date: "May 05", day: "Tue", status: "missed", pills: getRandomMissedPills() },
+  { date: "May 06", day: "Wed", status: "taken", pills: allTakenPills },
+  { date: "May 07", day: "Thu", status: "missed", pills: getRandomMissedPills() },
+  { date: "May 08", day: "Fri", status: "taken", pills: allTakenPills },
+  { date: "May 09", day: "Sat", status: "today", pills: [] },
 ];
 
 function Index() {
@@ -769,7 +790,7 @@ function Index() {
             {hardcoded7Days.map((item, idx) => (
               <div 
                 key={idx} 
-                className={`flex-none w-36 p-4 rounded-2xl snap-start border flex flex-col justify-between shadow-sm
+                className={`flex-none w-48 max-h-56 p-4 rounded-2xl snap-start border flex flex-col justify-between shadow-sm overflow-y-auto
                   ${item.status === 'taken' ? 'bg-green-50 border-green-200' : 
                     item.status === 'missed' ? 'bg-red-50 border-red-200' : 
                     'bg-white border-slate-200'}`}
@@ -785,20 +806,42 @@ function Index() {
                     'text-slate-800'}`}>{item.date}</p>
                 </div>
                 <div>
-                  <div className={`inline-block px-2 py-1 rounded-md text-[10px] font-bold uppercase mb-2
+                  <div className={`inline-block px-2 py-1 rounded-md text-[10px] font-bold uppercase mb-3
                     ${item.status === 'taken' ? 'bg-green-200 text-green-800' : 
                       item.status === 'missed' ? 'bg-red-200 text-red-800' : 
                       'bg-slate-100 text-slate-600'}`}>
                     {item.status === 'today' ? 'Today' : item.status}
                   </div>
-                  <p className={`text-sm font-bold truncate ${
-                    item.status === 'taken' ? 'text-green-900' : 
-                    item.status === 'missed' ? 'text-red-900' : 
-                    'text-slate-800'}`}>{item.medication}</p>
-                  <p className={`text-xs truncate ${
-                    item.status === 'taken' ? 'text-green-700' : 
-                    item.status === 'missed' ? 'text-red-700' : 
-                    'text-slate-500'}`}>{item.time}</p>
+                  
+                  {/* Pills List */}
+                  {item.pills.length > 0 ? (
+                    <div className="space-y-2">
+                      {item.pills.map((pill, pillIdx) => (
+                        <div key={pillIdx} className="border-t border-current border-opacity-10 pt-2 first:border-t-0 first:pt-0">
+                          <p className={`text-xs font-bold ${
+                            item.status === 'taken' ? 'text-green-900' : 
+                            item.status === 'missed' ? 'text-red-900' : 
+                            'text-slate-800'}`}>
+                            {pill.name}
+                          </p>
+                          <p className={`text-[10px] ${
+                            item.status === 'taken' ? 'text-green-700' : 
+                            item.status === 'missed' ? 'text-red-700' : 
+                            'text-slate-600'}`}>
+                            {pill.dosage}
+                          </p>
+                          <p className={`text-[9px] ${
+                            item.status === 'taken' ? 'text-green-600' : 
+                            item.status === 'missed' ? 'text-red-600' : 
+                            'text-slate-500'}`}>
+                            {pill.time}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-500">--</p>
+                  )}
                 </div>
               </div>
             ))}
