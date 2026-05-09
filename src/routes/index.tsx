@@ -347,13 +347,30 @@ function Index() {
   const summaryLatestDose = summaryVisibleTakenDoses[0] ?? null;
   const summaryLastTakenTime = summaryLatestDose?.time || "--:--";
 
-  const handleClearSummary = () => {
+  const handleClearSummary = async () => {
+    const takenTodayDoses = doses.filter((dose) => dose.taken && dose.scheduled_date === todayKey);
+    
     setSummaryClearState({
       date: todayKey,
-      takenKeys: doses
-        .filter((dose) => dose.taken && dose.scheduled_date === todayKey)
-        .map((dose) => doseKey(dose)),
+      takenKeys: takenTodayDoses.map((dose) => doseKey(dose)),
     });
+
+    // Mark all taken doses as not taken
+    try {
+      await Promise.all(
+        takenTodayDoses.map((dose) =>
+          fetch(`http://127.0.0.1:5000/api/doses/${dose.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ taken: false }),
+          })
+        )
+      );
+      // Refresh doses after clearing
+      await fetchDoses();
+    } catch (error) {
+      console.error("Failed to clear summary:", error);
+    }
   };
 
   const syncTimerState = () => {
@@ -787,52 +804,74 @@ function Index() {
             </h2>
           </div>
           <div className="flex overflow-x-auto pb-4 gap-3 snap-x no-scrollbar">
-            {hardcoded7Days.map((item, idx) => (
+            {hardcoded7Days.map((item, idx) => {
+              // Get taken pills for today
+              let displayPills = item.pills;
+              if (item.status === 'today') {
+                const today = getLocalTodayKey();
+                const takenTodayDoses = doses.filter(
+                  d => d.taken && d.scheduled_date === today
+                );
+                displayPills = takenTodayDoses.map(dose => ({
+                  name: dose.medication,
+                  dosage: dose.dosage,
+                  time: dose.time
+                }));
+              }
+
+              return (
               <div 
                 key={idx} 
                 className={`flex-none w-48 max-h-56 p-4 rounded-2xl snap-start border flex flex-col justify-between shadow-sm overflow-y-auto
                   ${item.status === 'taken' ? 'bg-green-50 border-green-200' : 
                     item.status === 'missed' ? 'bg-red-50 border-red-200' : 
+                    item.status === 'today' ? 'bg-blue-50 border-blue-200' :
                     'bg-white border-slate-200'}`}
               >
                 <div className="mb-3">
                   <p className={`text-xs font-bold uppercase mb-1 ${
                     item.status === 'taken' ? 'text-green-600' : 
                     item.status === 'missed' ? 'text-red-600' : 
+                    item.status === 'today' ? 'text-blue-600' :
                     'text-slate-500'}`}>{item.day}</p>
                   <p className={`text-xl font-black ${
                     item.status === 'taken' ? 'text-green-800' : 
                     item.status === 'missed' ? 'text-red-800' : 
+                    item.status === 'today' ? 'text-blue-800' :
                     'text-slate-800'}`}>{item.date}</p>
                 </div>
                 <div>
                   <div className={`inline-block px-2 py-1 rounded-md text-[10px] font-bold uppercase mb-3
                     ${item.status === 'taken' ? 'bg-green-200 text-green-800' : 
                       item.status === 'missed' ? 'bg-red-200 text-red-800' : 
+                      item.status === 'today' ? 'bg-blue-200 text-blue-800' :
                       'bg-slate-100 text-slate-600'}`}>
-                    {item.status === 'today' ? 'Today' : item.status}
+                    {item.status === 'today' ? 'Pending' : item.status}
                   </div>
                   
                   {/* Pills List */}
-                  {item.pills.length > 0 ? (
+                  {displayPills.length > 0 ? (
                     <div className="space-y-2">
-                      {item.pills.map((pill, pillIdx) => (
+                      {displayPills.map((pill, pillIdx) => (
                         <div key={pillIdx} className="border-t border-current border-opacity-10 pt-2 first:border-t-0 first:pt-0">
                           <p className={`text-xs font-bold ${
                             item.status === 'taken' ? 'text-green-900' : 
                             item.status === 'missed' ? 'text-red-900' : 
+                            item.status === 'today' ? 'text-blue-900' :
                             'text-slate-800'}`}>
                             {pill.name}
                           </p>
                           <p className={`text-[10px] ${
                             item.status === 'taken' ? 'text-green-700' : 
                             item.status === 'missed' ? 'text-red-700' : 
+                            item.status === 'today' ? 'text-blue-700' :
                             'text-slate-600'}`}>
                             {pill.dosage}
                           </p>
                           <p className={`text-[9px] ${
                             item.status === 'taken' ? 'text-green-600' : 
                             item.status === 'missed' ? 'text-red-600' : 
+                            item.status === 'today' ? 'text-blue-600' :
                             'text-slate-500'}`}>
                             {pill.time}
                           </p>
@@ -844,7 +883,8 @@ function Index() {
                   )}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </section>
 
