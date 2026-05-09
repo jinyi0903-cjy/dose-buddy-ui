@@ -603,9 +603,12 @@ function Index() {
       )}
 
       <header className="px-5 pt-6 pb-4">
-        <div className="flex items-center gap-2 text-slate-700">
-          <Clock size={22} />
-          <h1 className="text-lg font-semibold">EZPill</h1>
+        <div className="flex items-center gap-3 text-slate-700">
+          <Clock size={24} />
+          <h1 className="text-3xl font-black leading-none tracking-[-0.04em] sm:text-4xl">
+            <span className="text-[#123a6f]">Pill</span>
+            <span className="text-[#4398f3]">Pal</span>
+          </h1>
         </div>
       </header>
 
