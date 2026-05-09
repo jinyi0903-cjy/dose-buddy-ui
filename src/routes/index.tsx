@@ -491,7 +491,8 @@ function Index() {
   }, [secondsLeft, state, loading, nextDose]);
 
   const absSeconds = Math.abs(secondsLeft || 0);
-  const mm = secondsLeft !== null ? String(Math.floor(absSeconds / 60)).padStart(2, "0") : "--";
+  const hh = secondsLeft !== null ? String(Math.floor(absSeconds / 3600)).padStart(2, "0") : "--";
+  const mm = secondsLeft !== null ? String(Math.floor((absSeconds % 3600) / 60)).padStart(2, "0") : "--";
   const ss = secondsLeft !== null ? String(absSeconds % 60).padStart(2, "0") : "--";
   const prefix = secondsLeft !== null && secondsLeft < 0 ? "-" : "";
 
@@ -643,7 +644,7 @@ function Index() {
                 Countdown
               </p>
               <p className="text-4xl font-mono font-extrabold text-black mt-1">
-                  {state === "missed" ? (nextDose ? `${prefix}${mm}:${ss}` : "OVERDUE") : `${prefix}${mm}:${ss}`}
+                  {state === "missed" ? (nextDose ? `${prefix}${hh}:${mm}:${ss}` : "OVERDUE") : `${prefix}${hh}:${mm}:${ss}`}
                 </p>
               </div>
               {state === "buzzing" && (
