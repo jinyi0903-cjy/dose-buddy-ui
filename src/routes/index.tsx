@@ -45,6 +45,16 @@ const getLocalTodayKey = () => {
   return `${year}-${month}-${day}`;
 };
 
+const hardcoded7Days = [
+  { date: "May 03", day: "Sun", status: "taken", medication: "Aspirin", time: "08:00 AM" },
+  { date: "May 04", day: "Mon", status: "taken", medication: "Aspirin", time: "08:15 AM" },
+  { date: "May 05", day: "Tue", status: "missed", medication: "Metformin", time: "Missed" },
+  { date: "May 06", day: "Wed", status: "taken", medication: "Metformin", time: "09:00 AM" },
+  { date: "May 07", day: "Thu", status: "missed", medication: "Vitamin D", time: "Missed" },
+  { date: "May 08", day: "Fri", status: "taken", medication: "Aspirin", time: "08:30 AM" },
+  { date: "May 09", day: "Sat", status: "today", medication: "Pending...", time: "--" },
+];
+
 function Index() {
   const currentDayKey = getLocalTodayKey();
   const [state, setState] = useState<AppState>("normal");
@@ -745,6 +755,53 @@ function Index() {
                 </button>
               </div>
             </div>
+          </div>
+        </section>
+
+        {/* 7-Day Activity Cards */}
+        <section className="-mx-5 px-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm uppercase tracking-widest text-slate-500 font-semibold">
+              7-Day Activity
+            </h2>
+          </div>
+          <div className="flex overflow-x-auto pb-4 gap-3 snap-x no-scrollbar">
+            {hardcoded7Days.map((item, idx) => (
+              <div 
+                key={idx} 
+                className={`flex-none w-36 p-4 rounded-2xl snap-start border flex flex-col justify-between shadow-sm
+                  ${item.status === 'taken' ? 'bg-green-50 border-green-200' : 
+                    item.status === 'missed' ? 'bg-red-50 border-red-200' : 
+                    'bg-white border-slate-200'}`}
+              >
+                <div className="mb-3">
+                  <p className={`text-xs font-bold uppercase mb-1 ${
+                    item.status === 'taken' ? 'text-green-600' : 
+                    item.status === 'missed' ? 'text-red-600' : 
+                    'text-slate-500'}`}>{item.day}</p>
+                  <p className={`text-xl font-black ${
+                    item.status === 'taken' ? 'text-green-800' : 
+                    item.status === 'missed' ? 'text-red-800' : 
+                    'text-slate-800'}`}>{item.date}</p>
+                </div>
+                <div>
+                  <div className={`inline-block px-2 py-1 rounded-md text-[10px] font-bold uppercase mb-2
+                    ${item.status === 'taken' ? 'bg-green-200 text-green-800' : 
+                      item.status === 'missed' ? 'bg-red-200 text-red-800' : 
+                      'bg-slate-100 text-slate-600'}`}>
+                    {item.status === 'today' ? 'Today' : item.status}
+                  </div>
+                  <p className={`text-sm font-bold truncate ${
+                    item.status === 'taken' ? 'text-green-900' : 
+                    item.status === 'missed' ? 'text-red-900' : 
+                    'text-slate-800'}`}>{item.medication}</p>
+                  <p className={`text-xs truncate ${
+                    item.status === 'taken' ? 'text-green-700' : 
+                    item.status === 'missed' ? 'text-red-700' : 
+                    'text-slate-500'}`}>{item.time}</p>
+                </div>
+              </div>
+            ))}
           </div>
         </section>
 
