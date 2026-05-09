@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
-import { Clock, AlertTriangle, Pill, ChevronDown, Plus, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { CalendarDays, Clock, AlertTriangle, ChevronDown, Pill, Plus, X } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   component: Index,
@@ -27,6 +27,20 @@ type Dose = {
   max_doses_per_day?: number;
 };
 
+type WeeklyDaySnapshot = {
+  status: "taken" | "missed";
+  missedDoses: Array<Pick<Dose, "id" | "medication" | "dosage">>;
+};
+
+type WeeklyHistoryDay = {
+  scheduledDate: string;
+  dayName: string;
+  dateLabel: string;
+  dayDoses: Dose[];
+  missedDayDoses: Array<Pick<Dose, "id" | "medication" | "dosage">>;
+  status: "taken" | "missed" | "not-applicable";
+};
+
 const getLocalTodayKey = () => {
   const now = new Date();
   const year = now.getFullYear();
@@ -35,10 +49,43 @@ const getLocalTodayKey = () => {
   return `${year}-${month}-${day}`;
 };
 
+const getDateFromKey = (key: string) => {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Date(year, month - 1, day);
+};
+
+const toLocalDateKey = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const shiftDateKey = (key: string, offsetDays: number) => {
+  const date = getDateFromKey(key);
+  date.setDate(date.getDate() + offsetDays);
+  return toLocalDateKey(date);
+};
+
+const getWeekStartKey = (key: string) => {
+  const date = getDateFromKey(key);
+  date.setDate(date.getDate() - date.getDay());
+  return toLocalDateKey(date);
+};
+
+const formatCalendarDate = (key: string) =>
+  new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(getDateFromKey(key));
+
+const formatDayName = (key: string) =>
+  new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(getDateFromKey(key));
+
 function Index() {
   const currentDayKey = getLocalTodayKey();
   const [state, setState] = useState<AppState>("normal");
   const [expanded, setExpanded] = useState(false);
+  const [viewedDayKey, setViewedDayKey] = useState(currentDayKey);
+  const dateInputRef = useRef<HTMLInputElement | null>(null);
+  const previousViewedDayKeyRef = useRef(currentDayKey);
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
   const [doses, setDoses] = useState<Dose[]>([]);
   const [loading, setLoading] = useState(true);
@@ -48,6 +95,7 @@ function Index() {
   const [tick, setTick] = useState(0);
   const [timeOffsetSeconds, setTimeOffsetSeconds] = useState(0);
   const [lastSeenDayKey, setLastSeenDayKey] = useState(currentDayKey);
+  const [historySnapshots, setHistorySnapshots] = useState<Record<string, WeeklyDaySnapshot>>({});
   const [summaryClearState, setSummaryClearState] = useState<SummaryClearState | null>(() => {
     if (typeof window === "undefined") {
       return null;
@@ -104,16 +152,61 @@ function Index() {
     }
 
     setLastSeenDayKey(currentDayKey);
-    setExpanded(false);
+    setViewedDayKey(currentDayKey);
     setSecondsLeft(null);
     setState("normal");
     setShowAddModal(false);
     setDemoSpeed(1);
     setTimeOffsetSeconds(0);
     setSummaryClearState(null);
+    setHistorySnapshots({});
     resetNewDose();
     fetchDoses();
   }, [currentDayKey, lastSeenDayKey]);
+
+  useEffect(() => {
+    const previousViewedDayKey = previousViewedDayKeyRef.current;
+
+    if (previousViewedDayKey === viewedDayKey) {
+      return;
+    }
+
+    if (viewedDayKey < previousViewedDayKey) {
+      setHistorySnapshots((currentSnapshots) => {
+        const nextSnapshots = { ...currentSnapshots };
+
+        Object.keys(nextSnapshots).forEach((dateKey) => {
+          if (dateKey > viewedDayKey) {
+            delete nextSnapshots[dateKey];
+          }
+        });
+
+        return nextSnapshots;
+      });
+
+      previousViewedDayKeyRef.current = viewedDayKey;
+      return;
+    }
+
+    const previousDayDoses = doses.filter((dose) => dose.scheduled_date === previousViewedDayKey);
+    const missedDosesForPreviousDay = previousDayDoses
+      .filter((dose) => !dose.taken)
+      .map((dose) => ({
+        id: dose.id,
+        medication: dose.medication,
+        dosage: dose.dosage,
+      }));
+
+    setHistorySnapshots((currentSnapshots) => ({
+      ...currentSnapshots,
+      [previousViewedDayKey]: {
+        status: missedDosesForPreviousDay.length > 0 ? "missed" : "taken",
+        missedDoses: missedDosesForPreviousDay,
+      },
+    }));
+
+    previousViewedDayKeyRef.current = viewedDayKey;
+  }, [doses, viewedDayKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -156,7 +249,7 @@ function Index() {
     return Array.from(grouped.values()).map(mergeDoseGroup);
   };
 
-  const getSupplyGroups = (now = getSimulatedNow()) => {
+  const getSupplyGroups = () => {
     const grouped = new Map<string, Dose[]>();
 
     doses.forEach((dose) => {
@@ -168,9 +261,7 @@ function Index() {
 
     return Array.from(grouped.values())
       .map((group) => {
-        const sortedGroup = [...group].sort(
-          (a, b) => getDoseDateTime(a, now).getTime() - getDoseDateTime(b, now).getTime() || a.id - b.id,
-        );
+        const sortedGroup = [...group].sort((a, b) => a.time.localeCompare(b.time) || a.id - b.id);
         const [primary, ...rest] = sortedGroup.slice().reverse();
 
         return {
@@ -187,42 +278,22 @@ function Index() {
     return new Date(Date.now() + offsetSeconds * 1000);
   };
 
+  const getViewedNow = (now = getSimulatedNow()) => {
+    const viewedDate = getDateFromKey(viewedDayKey);
+    viewedDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+    return viewedDate;
+  };
+
   const getTabletAmount = (dose: Dose) => {
     const amount = Number.parseFloat(dose.dosage);
     return Number.isFinite(amount) ? amount : 1;
   };
 
-  const getTodayTakenSummary = (): { tabletTotal: number; latestDose: Dose | null } => {
-    const seen = new Set<string>();
-    let tabletTotal = 0;
-    let latestDose: Dose | null = null;
-
-    doses
-      .filter((dose) => dose.taken && dose.scheduled_date === todayKey)
-      .sort((a, b) => b.id - a.id)
-      .forEach((dose) => {
-        const key = doseKey(dose);
-
-        if (seen.has(key)) {
-          return;
-        }
-
-        seen.add(key);
-        tabletTotal += getTabletAmount(dose);
-
-        if (!latestDose) {
-          latestDose = dose;
-        }
-      });
-
-    return { tabletTotal, latestDose };
-  };
-
   const getDoseDateTime = (dose: Dose, now = getSimulatedNow()) => {
     const scheduledDate = dose.scheduled_date || now.toISOString().slice(0, 10);
-    const [hours, minutes] = dose.time.split(":").map(Number);
+    const [hours, minutes, seconds = "0"] = dose.time.split(":");
     const target = new Date(`${scheduledDate}T00:00:00`);
-    target.setHours(hours, minutes, 0, 0);
+    target.setHours(Number(hours), Number(minutes), Number(seconds), 0);
     return target;
   };
 
@@ -245,41 +316,25 @@ function Index() {
       .sort((a, b) => getDoseDateTime(a, now).getTime() - getDoseDateTime(b, now).getTime());
   };
 
-  const getActiveSupplies = (now = getSimulatedNow()) => {
-    return getSupplyGroups(now).sort((a, b) => {
-      const aNext = getNextOccurrenceForSupply(a, now);
-      const bNext = getNextOccurrenceForSupply(b, now);
-
-      if (aNext && bNext) {
-        return getDoseDateTime(aNext, now).getTime() - getDoseDateTime(bNext, now).getTime();
-      }
-
-      if (aNext) return -1;
-      if (bNext) return 1;
-
-      return a.medication.localeCompare(b.medication);
+  const getActiveSupplies = () => {
+    return getSupplyGroups().sort((a, b) => {
+      return a.time.localeCompare(b.time) || a.medication.localeCompare(b.medication);
     });
   };
 
-  const getNextOccurrenceForSupply = (supply: DoseGroup, now = getSimulatedNow()) => {
-    const nextOccurrence = doses
-      .filter(
-        (dose) =>
-          dose.medication.toLowerCase() === supply.medication.toLowerCase() &&
-          dose.slot === supply.slot &&
-          !dose.taken &&
-          getDoseDiff(dose, now) >= 0,
-      )
-      .sort((a, b) => getDoseDateTime(a, now).getTime() - getDoseDateTime(b, now).getTime())[0];
-
-    return nextOccurrence ?? null;
+  const getNextOccurrenceForSupply = (supply: DoseGroup, selectedDayKey = viewedDayKey): Dose => {
+    return {
+      ...supply,
+      scheduled_date: selectedDayKey,
+      time: supply.time,
+    };
   };
 
   const simulatedNow = getSimulatedNow();
-  const nextDose = getNextDoseForTimer(simulatedNow);
+  const viewedNow = getViewedNow(simulatedNow);
+  const nextDose = getNextDoseForTimer(viewedNow);
   const missedDoses = getMissedDoses(simulatedNow);
-  const todayKey = currentDayKey;
-  const todaysTakenSummary = getTodayTakenSummary();
+  const todayKey = viewedDayKey;
   const summaryClearedToday = summaryClearState?.date === todayKey;
   const summaryBaselineKeys = new Set(summaryClearedToday ? summaryClearState?.takenKeys ?? [] : []);
   const summaryVisibleTakenDoses = doses
@@ -288,6 +343,25 @@ function Index() {
   const summaryTakenCount = summaryVisibleTakenDoses.reduce((total, dose) => total + getTabletAmount(dose), 0);
   const summaryLatestDose = summaryVisibleTakenDoses[0] ?? null;
   const summaryLastTakenTime = summaryLatestDose?.time || "--:--";
+  const weekStartKey = getWeekStartKey(todayKey);
+  const weeklyHistoryDays: WeeklyHistoryDay[] = Array.from({ length: 7 }, (_, index) => {
+    const scheduledDate = shiftDateKey(weekStartKey, index);
+    const dayDoses = doses
+      .filter((dose) => dose.scheduled_date === scheduledDate)
+      .sort((a, b) => getDoseDateTime(a, viewedNow).getTime() - getDoseDateTime(b, viewedNow).getTime() || a.id - b.id);
+    const snapshot = historySnapshots[scheduledDate];
+    const missedDoses = snapshot?.status === "missed" ? snapshot.missedDoses : [];
+    const status = snapshot?.status ?? "not-applicable";
+
+    return {
+      scheduledDate,
+      dayName: formatDayName(scheduledDate),
+      dateLabel: formatCalendarDate(scheduledDate),
+      dayDoses,
+      missedDayDoses: missedDoses,
+      status,
+    };
+  });
 
   const handleClearSummary = () => {
     setSummaryClearState({
@@ -298,25 +372,51 @@ function Index() {
     });
   };
 
+  const handleTakeMissedDose = async (dose: Dose) => {
+    try {
+      const sameGroup = doses.filter(
+        (item) =>
+          item.medication.toLowerCase() === dose.medication.toLowerCase() &&
+          item.scheduled_date === dose.scheduled_date &&
+          item.time === dose.time &&
+          item.slot === dose.slot &&
+          !item.taken,
+      );
+
+      const responses = await Promise.all(
+        sameGroup.map((item, index) =>
+          fetch(`http://127.0.0.1:5000/api/doses/${item.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              taken: true,
+              decrement_stock: index === 0,
+              schedule_next: index === 0 && (item.interval ?? 0) > 0,
+            }),
+          }),
+        ),
+      );
+
+      if (responses.every((response) => response.ok)) {
+        await fetchDoses();
+      }
+    } catch (error) {
+      console.error("Failed to update missed dose:", error);
+    }
+  };
+
   const syncTimerState = () => {
-    const now = getSimulatedNow();
-    const currentMissedDose = getMissedDoses(now)[0];
+    const now = getViewedNow();
     const currentNextDose = getNextDoseForTimer(now);
 
-    if (!currentNextDose && !currentMissedDose) {
+    if (!currentNextDose) {
       setSecondsLeft(null);
       setState("normal");
       return;
     }
 
-    const activeDose = currentNextDose ?? currentMissedDose;
-    const nextSecondsLeft = activeDose ? getDoseDiff(activeDose, now) : null;
+    const nextSecondsLeft = getDoseDiff(currentNextDose, now);
     setSecondsLeft(nextSecondsLeft);
-
-    if (currentMissedDose) {
-      setState("missed");
-      return;
-    }
 
     if (nextSecondsLeft === null) {
       setState("normal");
@@ -491,42 +591,13 @@ function Index() {
   }, [secondsLeft, state, loading, nextDose]);
 
   const absSeconds = Math.abs(secondsLeft || 0);
-  const mm = secondsLeft !== null ? String(Math.floor(absSeconds / 60)).padStart(2, "0") : "--";
-  const ss = secondsLeft !== null ? String(absSeconds % 60).padStart(2, "0") : "--";
   const prefix = secondsLeft !== null && secondsLeft < 0 ? "-" : "";
-
-  const handleTakeMissedDose = async (dose: Dose) => {
-    try {
-      const sameGroup = doses.filter(
-        (item) =>
-          item.medication.toLowerCase() === dose.medication.toLowerCase() &&
-          item.scheduled_date === dose.scheduled_date &&
-          item.time === dose.time &&
-          item.slot === dose.slot &&
-          !item.taken,
-      );
-
-      const responses = await Promise.all(
-        sameGroup.map((item, index) =>
-          fetch(`http://127.0.0.1:5000/api/doses/${item.id}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              taken: true,
-              decrement_stock: index === 0,
-              schedule_next: index === 0 && (item.interval ?? 0) > 0,
-            }),
-          }),
-        ),
-      );
-
-      if (responses.every((response) => response.ok)) {
-        await fetchDoses();
-      }
-    } catch (error) {
-      console.error("Failed to update missed dose:", error);
-    }
-  };
+  const hh = secondsLeft !== null ? String(Math.floor(absSeconds / 3600)).padStart(2, "0") : "--";
+  const mmFromCountdown = secondsLeft !== null ? String(Math.floor((absSeconds % 3600) / 60)).padStart(2, "0") : "--";
+  const ssFromCountdown = secondsLeft !== null ? String(absSeconds % 60).padStart(2, "0") : "--";
+  const countdownLabel = secondsLeft !== null
+    ? `${prefix}${hh} : ${mmFromCountdown} : ${ssFromCountdown}`
+    : "-- : -- : --";
 
   const handleDeleteSupply = async (dose: DoseGroup) => {
     const confirmed = window.confirm(`Delete ${dose.medication} at ${dose.time}?`);
@@ -566,10 +637,10 @@ function Index() {
 
   return (
     <div className="min-h-screen bg-slate-50 mx-auto max-w-md relative">
-      {state === "missed" && (
+      {todayKey === currentDayKey && missedDoses.length > 0 && (
         <div className="sticky top-0 z-50 bg-red-600 text-white shadow-lg">
           <button
-            onClick={() => setExpanded((e) => !e)}
+            onClick={() => setExpanded((value) => !value)}
             className="w-full flex items-center justify-between px-4 py-3 font-bold tracking-wide"
           >
             <span className="flex items-center gap-2">
@@ -581,14 +652,13 @@ function Index() {
               className={`transition-transform ${expanded ? "rotate-180" : ""}`}
             />
           </button>
-          {expanded && missedDoses.length > 0 && (
+          {expanded && (
             <div className="px-4 pb-4 text-sm bg-red-700 space-y-3">
               {missedDoses.map((dose) => (
                 <div key={dose.id} className="rounded-lg bg-red-800/60 p-3">
                   <p className="font-semibold">
                     {dose.medication} — {dose.dosage}
                   </p>
-                  <p>Scheduled at {dose.time}.</p>
                   <button
                     onClick={() => handleTakeMissedDose(dose)}
                     className="mt-3 w-full py-2 bg-white text-red-700 rounded-lg font-bold hover:bg-slate-100 transition-colors"
@@ -613,6 +683,35 @@ function Index() {
       </header>
 
       <main className="px-5 pb-8 space-y-6">
+        <section className="rounded-2xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Date Simulator</p>
+              <p className="mt-1 text-sm font-semibold text-slate-900">
+                Viewing {formatDayName(todayKey)}, {formatCalendarDate(todayKey)}
+              </p>
+            </div>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => dateInputRef.current?.showPicker?.() ?? dateInputRef.current?.click()}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-700 transition-colors hover:bg-slate-100"
+                aria-label="Choose date"
+              >
+                <CalendarDays size={18} />
+              </button>
+              <input
+                ref={dateInputRef}
+                type="date"
+                value={todayKey}
+                onChange={(event) => setViewedDayKey(event.target.value)}
+                className="sr-only"
+                aria-label="Choose date"
+              />
+            </div>
+          </div>
+        </section>
+
         {/* Next Dose Card */}
         <section
           className={`rounded-2xl bg-white border-2 overflow-hidden transition-all duration-300 ${cardClasses}`}
@@ -642,8 +741,8 @@ function Index() {
               <p className="text-xs uppercase tracking-widest text-slate-500">
                 Countdown
               </p>
-              <p className="text-4xl font-mono font-extrabold text-black mt-1">
-                  {state === "missed" ? (nextDose ? `${prefix}${mm}:${ss}` : "OVERDUE") : `${prefix}${mm}:${ss}`}
+              <p className="mt-1 whitespace-nowrap text-2xl font-mono font-extrabold text-black sm:text-3xl">
+                  {state === "missed" ? (nextDose ? countdownLabel : "OVERDUE") : countdownLabel}
                 </p>
               </div>
               {state === "buzzing" && (
@@ -683,13 +782,13 @@ function Index() {
         <section className="rounded-2xl bg-white border border-slate-200 p-5">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-sm uppercase tracking-widest text-slate-500 font-semibold">
-              Today's Summary
+              Selected Day Summary
             </h2>
             <button
               onClick={handleClearSummary}
               className="rounded-full border border-slate-200 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700"
             >
-              {summaryClearedToday ? "Cleared Today" : "Clear Summary"}
+              {summaryClearedToday ? "Cleared" : "Clear Summary"}
             </button>
           </div>
           <div className="mt-3 flex items-end justify-between">
@@ -697,7 +796,7 @@ function Index() {
               <p className="text-4xl font-extrabold text-black">
                 {summaryTakenCount}
               </p>
-              <p className="text-sm text-slate-600">tablets taken today</p>
+              <p className="text-sm text-slate-600">tablets taken on selected day</p>
             </div>
             <div className="text-right">
               <p className="text-sm text-slate-500">Last taken</p>
@@ -710,6 +809,78 @@ function Index() {
                   ? `${summaryLatestDose.medication} • ${summaryLatestDose.dosage}`
                   : "--"}
               </p>
+            </div>
+          </div>
+        </section>
+
+        <section className="px-0">
+          <div className="flex items-center gap-2">
+            <CalendarDays size={18} className="text-slate-700" />
+            <div>
+              <h2 className="text-sm uppercase tracking-widest text-slate-500 font-semibold">
+                Weekly History
+              </h2>
+              <p className="text-xs text-slate-500">Sunday to Saturday pill-taking history</p>
+            </div>
+          </div>
+
+          <div className="mt-4 overflow-x-auto pb-2">
+            <div className="flex min-w-max gap-3">
+              {weeklyHistoryDays.map((day) => {
+                const isUntouched = day.status === "not-applicable";
+                const hasMissed = day.status === "missed";
+                const isTaken = day.status === "taken";
+                const cardClasses = isUntouched
+                  ? "border-sky-200 bg-sky-50"
+                  : hasMissed
+                    ? "border-rose-200 bg-rose-50"
+                    : "border-emerald-200 bg-emerald-50";
+                const badgeClasses = isUntouched
+                  ? "bg-sky-100 text-sky-700"
+                  : hasMissed
+                    ? "bg-rose-100 text-rose-700"
+                    : "bg-emerald-100 text-emerald-700";
+
+                return (
+                  <article
+                    key={day.scheduledDate}
+                    className={`flex h-48 w-44 shrink-0 flex-col rounded-2xl border p-3 ${cardClasses}`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-slate-900">{day.dayName}</p>
+                        <p className="text-xs text-slate-500">{day.dateLabel}</p>
+                      </div>
+                      <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-widest ${badgeClasses}`}>
+                        {isUntouched ? "N/A" : hasMissed ? "MISSED" : "TAKEN"}
+                      </span>
+                    </div>
+
+                    <div className="mt-4 flex flex-1 items-center justify-center text-center">
+                      {hasMissed ? (
+                        <div className="w-full space-y-2 text-left">
+                          <p className="text-[10px] font-black uppercase tracking-widest text-rose-700">
+                            Missed
+                          </p>
+                          {day.missedDayDoses.map((dose) => (
+                            <div
+                              key={dose.id}
+                              className="rounded-xl border border-rose-200 bg-white px-3 py-2 text-sm text-rose-700"
+                            >
+                              <p className="font-semibold text-slate-900">{dose.medication}</p>
+                              <p className="text-xs opacity-80">{dose.dosage}</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className={`text-sm font-semibold ${isUntouched ? "text-slate-500" : "text-emerald-700"}`}>
+                          {isUntouched ? "N/A" : isTaken ? "TAKEN" : "N/A"}
+                        </p>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           </div>
         </section>
@@ -732,8 +903,8 @@ function Index() {
             {loading ? (
               <p>Loading supplies...</p>
             ) : (
-                getActiveSupplies(simulatedNow).map((s) => {
-                  const nextOccurrence = getNextOccurrenceForSupply(s);
+                getActiveSupplies().map((s) => {
+                  const nextOccurrence = getNextOccurrenceForSupply(s, todayKey);
 
                   return (
                 <li
