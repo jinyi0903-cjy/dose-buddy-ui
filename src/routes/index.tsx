@@ -7,6 +7,12 @@ export const Route = createFileRoute("/")({
 });
 
 type AppState = "normal" | "upcoming" | "buzzing" | "missed";
+const SUMMARY_CLEARED_STORAGE_KEY = "dose-buddy-summary-cleared-for-date";
+
+type SummaryClearState = {
+  date: string;
+  takenCount: number;
+};
 
 type Dose = {
   id: number;
@@ -32,6 +38,23 @@ function Index() {
   const [demoSpeed, setDemoSpeed] = useState(1);
   const [tick, setTick] = useState(0);
   const [timeOffsetSeconds, setTimeOffsetSeconds] = useState(0);
+  const [summaryClearState, setSummaryClearState] = useState<SummaryClearState | null>(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+
+    const rawValue = window.localStorage.getItem(SUMMARY_CLEARED_STORAGE_KEY);
+
+    if (!rawValue) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(rawValue) as SummaryClearState;
+    } catch {
+      return null;
+    }
+  });
   const [newDose, setNewDose] = useState({
     medication: "",
     dosage: "1",
@@ -65,6 +88,18 @@ function Index() {
     fetchDoses();
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (summaryClearState) {
+      window.localStorage.setItem(SUMMARY_CLEARED_STORAGE_KEY, JSON.stringify(summaryClearState));
+    } else {
+      window.localStorage.removeItem(SUMMARY_CLEARED_STORAGE_KEY);
+    }
+  }, [summaryClearState]);
+
   const doseKey = (dose: Dose) =>
     `${dose.medication.trim().toLowerCase()}|${dose.scheduled_date}|${dose.time}`;
 
@@ -94,6 +129,8 @@ function Index() {
   const getSimulatedNow = (offsetSeconds = timeOffsetSeconds) => {
     return new Date(Date.now() + offsetSeconds * 1000);
   };
+
+  const getTodayKey = () => new Date().toISOString().slice(0, 10);
 
   const getDoseDateTime = (dose: Dose, now = getSimulatedNow()) => {
     const scheduledDate = dose.scheduled_date || now.toISOString().slice(0, 10);
@@ -131,6 +168,19 @@ function Index() {
   const simulatedNow = getSimulatedNow();
   const nextDose = getNextDoseForTimer(simulatedNow);
   const missedDoses = getMissedDoses(simulatedNow);
+  const todayKey = getTodayKey();
+  const todaysTakenDoses = doses.filter((dose) => dose.taken && dose.scheduled_date === todayKey);
+  const summaryClearedToday = summaryClearState?.date === todayKey;
+  const summaryBaselineCount = summaryClearedToday ? summaryClearState?.takenCount ?? 0 : 0;
+  const summaryTakenCount = Math.max(todaysTakenDoses.length - summaryBaselineCount, 0);
+  const summaryLatestDose = summaryTakenCount > 0
+    ? [...todaysTakenDoses].sort((a, b) => b.id - a.id)[0] ?? null
+    : null;
+  const summaryLastTakenTime = summaryLatestDose?.time || "--:--";
+
+  const handleClearSummary = () => {
+    setSummaryClearState({ date: todayKey, takenCount: todaysTakenDoses.length });
+  };
 
   const syncTimerState = () => {
     const now = getSimulatedNow();
@@ -489,20 +539,34 @@ function Index() {
 
         {/* Doses Taken Summary */}
         <section className="rounded-2xl bg-white border border-slate-200 p-5">
-          <h2 className="text-sm uppercase tracking-widest text-slate-500 font-semibold">
-            Today's Summary
-          </h2>
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm uppercase tracking-widest text-slate-500 font-semibold">
+              Today's Summary
+            </h2>
+            <button
+              onClick={handleClearSummary}
+              className="rounded-full border border-slate-200 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700"
+            >
+              {summaryClearedToday ? "Cleared Today" : "Clear Summary"}
+            </button>
+          </div>
           <div className="mt-3 flex items-end justify-between">
             <div>
               <p className="text-4xl font-extrabold text-black">
-                {doses.filter(d => d.taken).length}
+                {summaryTakenCount}
               </p>
               <p className="text-sm text-slate-600">pills taken today</p>
             </div>
             <div className="text-right">
               <p className="text-sm text-slate-500">Last taken</p>
               <p className="text-lg font-bold text-black">
-                {doses.filter(d => d.taken).sort((a,b) => b.id - a.id)[0]?.time || "--:--"}
+                {summaryLastTakenTime}
+              </p>
+              <p className="mt-2 text-sm text-slate-500">Most recent pill</p>
+              <p className="text-base font-bold text-black">
+                {summaryLatestDose
+                  ? `${summaryLatestDose.medication} • ${summaryLatestDose.dosage}`
+                  : "--"}
               </p>
             </div>
           </div>
