@@ -11,7 +11,7 @@ const SUMMARY_CLEARED_STORAGE_KEY = "dose-buddy-summary-cleared-for-date";
 
 type SummaryClearState = {
   date: string;
-  takenCount: number;
+  takenKeys: string[];
 };
 
 type Dose = {
@@ -27,7 +27,16 @@ type Dose = {
   max_doses_per_day?: number;
 };
 
+const getLocalTodayKey = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
 function Index() {
+  const currentDayKey = getLocalTodayKey();
   const [state, setState] = useState<AppState>("normal");
   const [expanded, setExpanded] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
@@ -38,6 +47,7 @@ function Index() {
   const [demoSpeed, setDemoSpeed] = useState(1);
   const [tick, setTick] = useState(0);
   const [timeOffsetSeconds, setTimeOffsetSeconds] = useState(0);
+  const [lastSeenDayKey, setLastSeenDayKey] = useState(currentDayKey);
   const [summaryClearState, setSummaryClearState] = useState<SummaryClearState | null>(() => {
     if (typeof window === "undefined") {
       return null;
@@ -89,6 +99,23 @@ function Index() {
   }, []);
 
   useEffect(() => {
+    if (lastSeenDayKey === currentDayKey) {
+      return;
+    }
+
+    setLastSeenDayKey(currentDayKey);
+    setExpanded(false);
+    setSecondsLeft(null);
+    setState("normal");
+    setShowAddModal(false);
+    setDemoSpeed(1);
+    setTimeOffsetSeconds(0);
+    setSummaryClearState(null);
+    resetNewDose();
+    fetchDoses();
+  }, [currentDayKey, lastSeenDayKey]);
+
+  useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
@@ -101,14 +128,17 @@ function Index() {
   }, [summaryClearState]);
 
   const doseKey = (dose: Dose) =>
-    `${dose.medication.trim().toLowerCase()}|${dose.scheduled_date}|${dose.time}`;
+    `${dose.medication.trim().toLowerCase()}|${dose.scheduled_date}|${dose.time}|${dose.slot}`;
+
+  const supplyKey = (dose: Dose) =>
+    `${dose.medication.trim().toLowerCase()}|${dose.slot}`;
 
   const mergeDoseGroup = (group: Dose[]): DoseGroup => {
     const [primary, ...rest] = group;
     return {
       ...primary,
       pills_count: group.reduce((sum, dose) => sum + dose.pills_count, 0),
-      taken: group.every((dose) => dose.taken),
+      taken: group.some((dose) => dose.taken),
       duplicates: rest,
     };
   };
@@ -126,11 +156,67 @@ function Index() {
     return Array.from(grouped.values()).map(mergeDoseGroup);
   };
 
+  const getSupplyGroups = (now = getSimulatedNow()) => {
+    const grouped = new Map<string, Dose[]>();
+
+    doses.forEach((dose) => {
+      const key = supplyKey(dose);
+      const current = grouped.get(key) ?? [];
+      current.push(dose);
+      grouped.set(key, current);
+    });
+
+    return Array.from(grouped.values())
+      .map((group) => {
+        const sortedGroup = [...group].sort(
+          (a, b) => getDoseDateTime(a, now).getTime() - getDoseDateTime(b, now).getTime() || a.id - b.id,
+        );
+        const [primary, ...rest] = sortedGroup.slice().reverse();
+
+        return {
+          ...primary,
+          pills_count: primary.pills_count,
+          taken: primary.taken,
+          duplicates: rest,
+        };
+      })
+      .filter((dose) => dose.pills_count > 0);
+  };
+
   const getSimulatedNow = (offsetSeconds = timeOffsetSeconds) => {
     return new Date(Date.now() + offsetSeconds * 1000);
   };
 
-  const getTodayKey = () => new Date().toISOString().slice(0, 10);
+  const getTabletAmount = (dose: Dose) => {
+    const amount = Number.parseFloat(dose.dosage);
+    return Number.isFinite(amount) ? amount : 1;
+  };
+
+  const getTodayTakenSummary = (): { tabletTotal: number; latestDose: Dose | null } => {
+    const seen = new Set<string>();
+    let tabletTotal = 0;
+    let latestDose: Dose | null = null;
+
+    doses
+      .filter((dose) => dose.taken && dose.scheduled_date === todayKey)
+      .sort((a, b) => b.id - a.id)
+      .forEach((dose) => {
+        const key = doseKey(dose);
+
+        if (seen.has(key)) {
+          return;
+        }
+
+        seen.add(key);
+        tabletTotal += getTabletAmount(dose);
+
+        if (!latestDose) {
+          latestDose = dose;
+        }
+      });
+
+    return { tabletTotal, latestDose };
+  };
 
   const getDoseDateTime = (dose: Dose, now = getSimulatedNow()) => {
     const scheduledDate = dose.scheduled_date || now.toISOString().slice(0, 10);
@@ -160,26 +246,56 @@ function Index() {
   };
 
   const getActiveSupplies = (now = getSimulatedNow()) => {
-    return getUniqueDoses(doses)
-      .filter((dose) => !dose.taken)
-      .sort((a, b) => getDoseDateTime(a, now).getTime() - getDoseDateTime(b, now).getTime());
+    return getSupplyGroups(now).sort((a, b) => {
+      const aNext = getNextOccurrenceForSupply(a, now);
+      const bNext = getNextOccurrenceForSupply(b, now);
+
+      if (aNext && bNext) {
+        return getDoseDateTime(aNext, now).getTime() - getDoseDateTime(bNext, now).getTime();
+      }
+
+      if (aNext) return -1;
+      if (bNext) return 1;
+
+      return a.medication.localeCompare(b.medication);
+    });
+  };
+
+  const getNextOccurrenceForSupply = (supply: DoseGroup, now = getSimulatedNow()) => {
+    const nextOccurrence = doses
+      .filter(
+        (dose) =>
+          dose.medication.toLowerCase() === supply.medication.toLowerCase() &&
+          dose.slot === supply.slot &&
+          !dose.taken &&
+          getDoseDiff(dose, now) >= 0,
+      )
+      .sort((a, b) => getDoseDateTime(a, now).getTime() - getDoseDateTime(b, now).getTime())[0];
+
+    return nextOccurrence ?? null;
   };
 
   const simulatedNow = getSimulatedNow();
   const nextDose = getNextDoseForTimer(simulatedNow);
   const missedDoses = getMissedDoses(simulatedNow);
-  const todayKey = getTodayKey();
-  const todaysTakenDoses = doses.filter((dose) => dose.taken && dose.scheduled_date === todayKey);
+  const todayKey = currentDayKey;
+  const todaysTakenSummary = getTodayTakenSummary();
   const summaryClearedToday = summaryClearState?.date === todayKey;
-  const summaryBaselineCount = summaryClearedToday ? summaryClearState?.takenCount ?? 0 : 0;
-  const summaryTakenCount = Math.max(todaysTakenDoses.length - summaryBaselineCount, 0);
-  const summaryLatestDose = summaryTakenCount > 0
-    ? [...todaysTakenDoses].sort((a, b) => b.id - a.id)[0] ?? null
-    : null;
+  const summaryBaselineKeys = new Set(summaryClearedToday ? summaryClearState?.takenKeys ?? [] : []);
+  const summaryVisibleTakenDoses = doses
+    .filter((dose) => dose.taken && dose.scheduled_date === todayKey && !summaryBaselineKeys.has(doseKey(dose)))
+    .sort((a, b) => b.id - a.id);
+  const summaryTakenCount = summaryVisibleTakenDoses.reduce((total, dose) => total + getTabletAmount(dose), 0);
+  const summaryLatestDose = summaryVisibleTakenDoses[0] ?? null;
   const summaryLastTakenTime = summaryLatestDose?.time || "--:--";
 
   const handleClearSummary = () => {
-    setSummaryClearState({ date: todayKey, takenCount: todaysTakenDoses.length });
+    setSummaryClearState({
+      date: todayKey,
+      takenKeys: doses
+        .filter((dose) => dose.taken && dose.scheduled_date === todayKey)
+        .map((dose) => doseKey(dose)),
+    });
   };
 
   const syncTimerState = () => {
@@ -310,12 +426,25 @@ function Index() {
     }
   };
 
-  // Auto-fill time if medication name matches an existing untaken one
+  // Auto-fill time whenever medication name matches an existing untaken one
   useEffect(() => {
     if (newDose.medication) {
-      const match = doses.find(d => !d.taken && d.medication.toLowerCase() === newDose.medication.toLowerCase());
-      if (match && !newDose.time) {
-        setNewDose(prev => ({ ...prev, time: match.time }));
+      const match = [...doses]
+        .reverse()
+        .find((d) => !d.taken && d.medication.toLowerCase() === newDose.medication.toLowerCase());
+
+      if (match) {
+        setNewDose((prev) => ({
+          ...prev,
+          medication: match.medication,
+          dosage: match.dosage || prev.dosage,
+          time: match.time,
+          scheduled_date: match.scheduled_date || prev.scheduled_date,
+          slot: match.slot ?? prev.slot,
+          pills_count: match.pills_count ?? prev.pills_count,
+          interval: match.interval ?? prev.interval,
+          max_doses_per_day: match.max_doses_per_day ?? prev.max_doses_per_day,
+        }));
       }
     }
   }, [newDose.medication, doses]);
@@ -329,6 +458,7 @@ function Index() {
           dose.medication.toLowerCase() === nextDose.medication.toLowerCase() &&
           dose.scheduled_date === nextDose.scheduled_date &&
           dose.time === nextDose.time &&
+          dose.slot === nextDose.slot &&
           !dose.taken,
       );
 
@@ -337,7 +467,11 @@ function Index() {
           fetch(`http://127.0.0.1:5000/api/doses/${dose.id}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ taken: true, decrement_stock: index === 0, schedule_next: index === 0 }),
+            body: JSON.stringify({
+              taken: true,
+              decrement_stock: index === 0,
+              schedule_next: index === 0 && (dose.interval ?? 0) > 0,
+            }),
           }),
         ),
       );
@@ -368,6 +502,7 @@ function Index() {
           item.medication.toLowerCase() === dose.medication.toLowerCase() &&
           item.scheduled_date === dose.scheduled_date &&
           item.time === dose.time &&
+          item.slot === dose.slot &&
           !item.taken,
       );
 
@@ -376,7 +511,11 @@ function Index() {
           fetch(`http://127.0.0.1:5000/api/doses/${item.id}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ taken: true, decrement_stock: index === 0, schedule_next: index === 0 }),
+            body: JSON.stringify({
+              taken: true,
+              decrement_stock: index === 0,
+              schedule_next: index === 0 && (item.interval ?? 0) > 0,
+            }),
           }),
         ),
       );
@@ -466,7 +605,7 @@ function Index() {
       <header className="px-5 pt-6 pb-4">
         <div className="flex items-center gap-2 text-slate-700">
           <Clock size={22} />
-          <h1 className="text-lg font-semibold">PillPal Dispenser</h1>
+          <h1 className="text-lg font-semibold">EZPill</h1>
         </div>
       </header>
 
@@ -555,7 +694,7 @@ function Index() {
               <p className="text-4xl font-extrabold text-black">
                 {summaryTakenCount}
               </p>
-              <p className="text-sm text-slate-600">pills taken today</p>
+              <p className="text-sm text-slate-600">tablets taken today</p>
             </div>
             <div className="text-right">
               <p className="text-sm text-slate-500">Last taken</p>
@@ -590,7 +729,10 @@ function Index() {
             {loading ? (
               <p>Loading supplies...</p>
             ) : (
-              getActiveSupplies(simulatedNow).map((s) => (
+                getActiveSupplies(simulatedNow).map((s) => {
+                  const nextOccurrence = getNextOccurrenceForSupply(s);
+
+                  return (
                 <li
                   key={s.id}
                   className="flex items-center justify-between bg-teal-50 border border-teal-100 rounded-xl px-4 py-3"
@@ -603,22 +745,26 @@ function Index() {
                     <span className="text-[10px] text-slate-400 ml-7">
                       {s.pills_count} items left
                     </span>
+                    <span className="text-[10px] text-slate-500 ml-7">
+                      Slot {s.slot}
+                    </span>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-teal-800 font-bold">
-                      {s.time}
+                      {nextOccurrence?.time || "--"}
                     </span>
                     <button
                       type="button"
                       onClick={() => handleDeleteSupply(s)}
                       className="p-1 rounded-full text-red-600 hover:bg-red-100 transition-colors"
-                      aria-label={`Delete ${s.medication} at ${s.time}`}
+                      aria-label={`Delete ${s.medication} at ${nextOccurrence?.time || "--"}`}
                     >
                       <X size={16} />
                     </button>
                   </div>
                 </li>
-              ))
+                  );
+                })
             )}
           </ul>
         </section>

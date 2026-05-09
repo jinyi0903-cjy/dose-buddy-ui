@@ -1,4 +1,4 @@
-# Dose Buddy UI
+# Time to Eat Pill Liao
 
 A full-stack application for dose management, consisting of a TypeScript frontend (with Vite), a Python backend, and embedded device firmware.
 
